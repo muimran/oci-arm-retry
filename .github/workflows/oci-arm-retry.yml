@@ -1,0 +1,106 @@
+# Ask Oracle for the two free ARM instances, from GitHub rather than a laptop.
+#
+# The Always Free Ampere A1 capacity in ap-hyderabad-1 is almost always full:
+# 1,241 attempts from a Mac over six days returned "no capacity" every time.
+# The only way through is to keep asking, and there is no reason for a laptop to
+# stay awake doing it.
+#
+# Every 5 minutes. This repository is public, so Actions minutes are unlimited;
+# a private one is capped at 2,000 a month, which 5-minute runs would exhaust in
+# a fortnight. That is the only reason this lives in its own repository -- it
+# holds no data, only the workflow.
+#
+# GitHub disables scheduled workflows after 60 days with no repository activity,
+# and delays or drops runs when its own load is high, so expect fewer attempts
+# than the schedule implies. That is fine -- capacity appears at random.
+
+name: oci-arm-retry
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:        # lets you trigger one by hand
+
+concurrency:
+  group: oci-arm-retry      # never two attempts at once
+  cancel-in-progress: false
+
+jobs:
+  ask:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Install the OCI CLI
+        run: |
+          curl -sL https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh \
+            -o /tmp/install.sh
+          bash /tmp/install.sh --accept-all-defaults >/dev/null
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Write the OCI config from secrets
+        run: |
+          mkdir -p ~/.oci
+          printf '%s' "${{ secrets.OCI_KEY }}" > ~/.oci/key.pem
+          chmod 600 ~/.oci/key.pem
+          cat > ~/.oci/config <<CFG
+          [DEFAULT]
+          user=${{ secrets.OCI_USER }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY }}
+          region=${{ secrets.OCI_REGION }}
+          key_file=$HOME/.oci/key.pem
+          pass_phrase=${{ secrets.OCI_PASSPHRASE }}
+          CFG
+          chmod 600 ~/.oci/config
+
+      - name: Ask for capacity
+        id: ask
+        env:
+          T: ${{ secrets.OCI_TENANCY }}
+          SUBNET: ${{ secrets.OCI_SUBNET }}
+          IMAGE: ${{ secrets.OCI_IMAGE }}
+          SSH_PUB: ${{ secrets.OCI_SSH_PUB }}
+        run: |
+          set -u
+          # Stop if the instances already exist -- the free allowance is two.
+          HAVE=$(oci compute instance list --compartment-id "$T" --all \
+                   --query 'length(data[?"lifecycle-state"==`RUNNING`])' --raw-output 2>/dev/null || echo 0)
+          echo "running instances: ${HAVE:-0}"
+          if [ "${HAVE:-0}" -ge 2 ]; then
+            echo "already have two - nothing to do"
+            exit 0
+          fi
+
+          echo "$SSH_PUB" > /tmp/pub.key
+          ADS=$(oci iam availability-domain list --compartment-id "$T" \
+                  --query 'data[].name' --raw-output | tr -d '[]", ' | tr '\n' ' ')
+
+          # Try each availability domain, at 6 GB then 4 GB. Oracle frees
+          # capacity at random, so the shape that works is unpredictable.
+          for AD in $ADS; do
+            [ -z "$AD" ] && continue
+            for GB in 6 4; do
+              echo "asking $AD at ${GB}GB"
+              if oci compute instance launch \
+                   --compartment-id "$T" --availability-domain "$AD" \
+                   --shape VM.Standard.A1.Flex \
+                   --shape-config "{\"ocpus\":1,\"memoryInGBs\":$GB}" \
+                   --image-id "$IMAGE" --subnet-id "$SUBNET" \
+                   --assign-public-ip true \
+                   --metadata "{\"ssh_authorized_keys\":\"$(cat /tmp/pub.key)\"}" \
+                   --display-name "gmaps-arm-$(date +%s)" \
+                   --wait-for-state RUNNING --wait-interval-seconds 10 2>/tmp/err; then
+                echo "GOT ONE in $AD at ${GB}GB"
+                echo "got=yes" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              grep -q -i "out of capacity\|LimitExceeded\|InternalError" /tmp/err \
+                && echo "  no capacity" || { echo "  unexpected:"; cat /tmp/err; }
+            done
+          done
+          echo "no capacity anywhere this round"
+
+      - name: Say so loudly if it worked
+        if: steps.ask.outputs.got == 'yes'
+        run: |
+          echo "::notice title=Oracle ARM instance created::Check the OCI console"
