@@ -69,6 +69,9 @@ jobs:
           IMAGE: ${{ secrets.OCI_IMAGE }}
           SSH_PUB: ${{ secrets.OCI_SSH_PUB }}
         run: |
+          # +e, not -e: every launch attempt is EXPECTED to fail, and the
+          # failures are the data. -u stays on so a missing secret is loud.
+          set +e
           set -u
           # Stop if the instances already exist -- the free allowance is two.
           HAVE=$(oci compute instance list --compartment-id "$T" --all \
@@ -113,7 +116,12 @@ jobs:
             for GB in 6 4; do
               for ATTEMPT in 1 2; do
                 echo "asking $AD at ${GB}GB (try $ATTEMPT)"
-                try "$AD" "$GB"; rc=$?
+                # `&& ... || ...` keeps this in a condition context. A bare
+                # `try ...; rc=$?` is NOT: the step runs under `bash -e`, so
+                # the first non-zero return killed the whole script after one
+                # attempt. That regression shipped once; hence the belt and
+                # braces of `set +e` on the step as well.
+                try "$AD" "$GB" && rc=0 || rc=$?
                 if [ $rc -eq 0 ]; then
                   echo "GOT ONE in $AD at ${GB}GB"
                   echo "got=yes" >> "$GITHUB_OUTPUT"
