@@ -16,11 +16,15 @@
 # day, not 288 -- 63 runs over the first ten days. There is no way to force it.
 #
 # Because the runs are rare, each one has to count. Oracle rate-limits
-# launch_instance per user, so firing six attempts back to back meant the first
-# got a real answer ("out of capacity") and the rest came back 429
-# TooManyRequests -- a run that looked like six tries was really one. The loop
-# now pauses between attempts and treats a 429 as "ask again" rather than as an
-# answer.
+# launch_instance per user, so firing the attempts back to back meant the first
+# got a real answer ("out of capacity") and the next came back 429
+# TooManyRequests, which says nothing about capacity. The loop now pauses
+# between attempts and treats a 429 as "ask again" rather than as an answer.
+#
+# That is TWO attempts a run, not six: ap-hyderabad-1 has a single availability
+# domain, so the AD loop runs once and only the two memory sizes vary. The home
+# region cannot be changed, so more attempts would have to come from more shape
+# configurations, not more domains.
 
 name: oci-arm-retry
 
@@ -106,10 +110,13 @@ jobs:
           # Try each availability domain, at 6 GB then 4 GB. Oracle frees
           # capacity at random, so the shape that works is unpredictable.
           #
-          # PAUSE is why this works at all. Without it Oracle answered the first
-          # attempt and rate-limited the next five, so a run tested one
-          # combination instead of six. A rate-limited attempt waits longer and
+          # PAUSE is why this works at all. Without it Oracle answered the
+          # first attempt and rate-limited the next, so a run tested one
+          # combination instead of two. A rate-limited attempt waits longer and
           # is retried once, because it told us nothing about capacity.
+          #
+          # ap-hyderabad-1 has one availability domain, so $ADS holds a single
+          # entry and this is two attempts, not six.
           PAUSE=30
           for AD in $ADS; do
             [ -z "$AD" ] && continue
